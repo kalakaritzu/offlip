@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Offlip – convert files without uploading them</title>
+  <meta name="description" content="Offlip converts your images right in your browser. Nothing is uploaded, ever.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <h1>Off<span>lip</span></h1>
+    <p class="tagline">Convert files right in your browser. Nothing is uploaded.</p>
+  </header>
+
+  <main>
+    <section id="drop" class="drop" tabindex="0" role="button" aria-label="Choose images to convert">
+      <p class="drop-title">Drop images here</p>
+      <p class="drop-sub">or click to choose &middot; PNG, JPG, WebP, GIF, BMP, AVIF, SVG</p>
+      <input id="file-input" type="file" accept="image/*" multiple hidden>
+    </section>
+
+    <section class="controls" aria-label="Conversion settings">
+      <label>Convert to
+        <select id="format"></select>
+      </label>
+      <label id="quality-wrap"><span>Quality <output id="quality-out">90</output>%</span>
+        <input id="quality" type="range" min="1" max="100" value="90">
+      </label>
+      <label>Max width (px)
+        <input id="max-width" type="number" min="1" placeholder="original">
+      </label>
+    </section>
+
+    <section class="actions">
+      <button id="convert" class="primary" disabled>Convert</button>
+      <button id="download-all" disabled>Download all (.zip)</button>
+      <button id="clear" disabled>Clear</button>
+    </section>
+
+    <ul id="list" class="list" aria-live="polite"></ul>
+  </main>
+
+  <footer>
+    <p>Everything runs on your device. Close the tab and it's gone.</p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
