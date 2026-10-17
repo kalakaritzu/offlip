@@ -12,53 +12,100 @@ const FORMATS = [
 const $ = (id) => document.getElementById(id);
 const drop = $("drop");
 const fileInput = $("file-input");
-const formatSel = $("format");
+const formatsEl = $("formats");
 const qualityIn = $("quality");
 const qualityOut = $("quality-out");
 const qualityWrap = $("quality-wrap");
 const maxWidthIn = $("max-width");
-const convertBtn = $("convert");
+const autoDl = $("auto-download");
+const overlay = $("overlay");
+const bulk = $("bulk");
 const zipBtn = $("download-all");
 const clearBtn = $("clear");
 const listEl = $("list");
 
-/** @type {{file: File, li: HTMLLIElement, result: {blob: Blob, name: string, url: string}|null}[]} */
+/** @type {{file: File, li: HTMLLIElement, result: {blob: Blob, name: string, url: string}|null, thumb: string|null}[]} */
 let items = [];
+let selected = FORMATS[0];
+let runId = 0;        // bumped whenever settings change, so stale runs stop
+let running = false;
+let timer = 0;
+
+// Remembered between visits. Storage can be blocked, so every access is guarded.
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { /* ignore */ } },
+};
 
 init();
 
 async function init() {
   const supported = await Promise.all(FORMATS.map(canEncode));
-  FORMATS.forEach((f, i) => {
-    if (!supported[i]) return;
-    const opt = document.createElement("option");
-    opt.value = f.mime;
-    opt.textContent = f.label;
-    formatSel.appendChild(opt);
-  });
+  const available = FORMATS.filter((_, i) => supported[i]);
+  selected = available.find((f) => f.mime === store.get("format")) ?? available[0];
+
+  for (const f of available) {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = "format";
+    input.value = f.mime;
+    input.checked = f === selected;
+    input.addEventListener("change", () => {
+      selected = f;
+      store.set("format", f.mime);
+      updateQualityVisibility();
+      settingsChanged();
+    });
+    const span = document.createElement("span");
+    span.textContent = f.label;
+    label.append(input, span);
+    formatsEl.appendChild(label);
+  }
+
+  qualityIn.value = store.get("quality") ?? qualityIn.value;
+  qualityOut.textContent = qualityIn.value;
+  maxWidthIn.value = store.get("maxWidth") ?? "";
+  autoDl.checked = store.get("autoDownload") === "1";
   updateQualityVisibility();
 
   drop.addEventListener("click", () => fileInput.click());
   drop.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInput.click(); }
   });
-  drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
-  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
-  drop.addEventListener("drop", (e) => {
+  fileInput.addEventListener("change", () => { addFiles(fileInput.files); fileInput.value = ""; });
+
+  // The whole page is a drop target.
+  let depth = 0;
+  window.addEventListener("dragenter", (e) => {
+    if (!hasFiles(e)) return;
+    depth++;
+    overlay.hidden = false;
+  });
+  window.addEventListener("dragleave", () => { if (--depth <= 0) { depth = 0; overlay.hidden = true; } });
+  window.addEventListener("dragover", (e) => { if (hasFiles(e)) e.preventDefault(); });
+  window.addEventListener("drop", (e) => {
     e.preventDefault();
-    drop.classList.remove("over");
+    depth = 0;
+    overlay.hidden = true;
     addFiles(e.dataTransfer.files);
   });
   window.addEventListener("paste", (e) => addFiles(e.clipboardData?.files ?? []));
-  fileInput.addEventListener("change", () => { addFiles(fileInput.files); fileInput.value = ""; });
 
-  formatSel.addEventListener("change", () => { updateQualityVisibility(); invalidateResults(); });
-  qualityIn.addEventListener("input", () => { qualityOut.textContent = qualityIn.value; invalidateResults(); });
-  maxWidthIn.addEventListener("input", invalidateResults);
+  qualityIn.addEventListener("input", () => {
+    qualityOut.textContent = qualityIn.value;
+    store.set("quality", qualityIn.value);
+    settingsChanged();
+  });
+  maxWidthIn.addEventListener("input", () => { store.set("maxWidth", maxWidthIn.value); settingsChanged(); });
+  autoDl.addEventListener("change", () => store.set("autoDownload", autoDl.checked ? "1" : "0"));
 
-  convertBtn.addEventListener("click", convertAll);
   zipBtn.addEventListener("click", downloadZip);
   clearBtn.addEventListener("click", clearAll);
+}
+
+function hasFiles(e) {
+  return e.dataTransfer && [...e.dataTransfer.types].includes("Files");
 }
 
 function canEncode(format) {
@@ -69,25 +116,24 @@ function canEncode(format) {
   });
 }
 
-function currentFormat() {
-  return FORMATS.find((f) => f.mime === formatSel.value) ?? FORMATS[0];
-}
-
 function updateQualityVisibility() {
-  qualityWrap.style.display = currentFormat().lossy ? "" : "none";
+  qualityWrap.style.display = selected.lossy ? "" : "none";
 }
 
 function addFiles(fileList) {
+  let added = false;
   for (const file of fileList) {
     if (!file.type.startsWith("image/")) continue;
     const li = document.createElement("li");
     li.className = "item";
-    const item = { file, li, result: null };
-    renderItem(item, "Ready");
+    const item = { file, li, result: null, thumb: null };
+    renderItem(item, "Converting…");
     items.push(item);
     listEl.appendChild(li);
+    added = true;
   }
-  refreshButtons();
+  if (added) schedule(0);
+  refreshBulk();
 }
 
 function renderItem(item, status, cls = "") {
@@ -101,7 +147,7 @@ function renderItem(item, status, cls = "") {
   const info = document.createElement("div");
   const name = document.createElement("div");
   name.className = "name";
-  name.textContent = file.name;
+  name.textContent = result ? result.name : file.name;
   const meta = document.createElement("div");
   meta.className = "meta " + cls;
   meta.textContent = status;
@@ -116,15 +162,15 @@ function renderItem(item, status, cls = "") {
     a.download = result.name;
     a.textContent = "Download";
     side.appendChild(a);
-  } else {
-    const rm = document.createElement("button");
-    rm.className = "rm";
-    rm.type = "button";
-    rm.setAttribute("aria-label", "Remove " + file.name);
-    rm.textContent = "×";
-    rm.addEventListener("click", () => removeItem(item));
-    side.appendChild(rm);
   }
+  const rm = document.createElement("button");
+  rm.className = "rm";
+  rm.type = "button";
+  rm.setAttribute("aria-label", "Remove " + file.name);
+  rm.textContent = "×";
+  rm.addEventListener("click", () => removeItem(item));
+  side.appendChild(rm);
+
   li.append(img, info, side);
 }
 
@@ -132,7 +178,7 @@ function removeItem(item) {
   freeItem(item);
   item.li.remove();
   items = items.filter((i) => i !== item);
-  refreshButtons();
+  refreshBulk();
 }
 
 function freeItem(item) {
@@ -145,46 +191,74 @@ function freeItem(item) {
 function clearAll() {
   items.forEach((i) => { freeItem(i); i.li.remove(); });
   items = [];
-  refreshButtons();
+  refreshBulk();
 }
 
-// Settings changed: earlier results no longer match, so drop them.
-function invalidateResults() {
+function refreshBulk() {
+  const ready = items.filter((i) => i.result).length;
+  bulk.hidden = items.length === 0;
+  zipBtn.hidden = ready < 2;
+  zipBtn.textContent = `Download all (${ready}) as .zip`;
+}
+
+// Settings changed: earlier results no longer match, so drop them and redo.
+function settingsChanged() {
   for (const item of items) {
     if (!item.result) continue;
     URL.revokeObjectURL(item.result.url);
     item.result = null;
-    renderItem(item, "Ready");
+    renderItem(item, "Converting…");
   }
-  refreshButtons();
+  items.forEach((i) => { i.failed = false; });
+  runId++;
+  refreshBulk();
+  schedule(150);
 }
 
-function refreshButtons() {
-  convertBtn.disabled = items.length === 0;
-  clearBtn.disabled = items.length === 0;
-  zipBtn.disabled = !items.some((i) => i.result);
+function schedule(delay) {
+  clearTimeout(timer);
+  timer = setTimeout(processQueue, delay);
 }
 
-async function convertAll() {
-  convertBtn.disabled = true;
-  const format = currentFormat();
+async function processQueue() {
+  if (running) { schedule(50); return; }
+  running = true;
+  const myRun = runId;
+  const format = selected;
   const quality = Number(qualityIn.value) / 100;
   const maxWidth = parseInt(maxWidthIn.value, 10) || 0;
 
-  for (const item of items) {
-    if (item.result) continue;
-    renderItem(item, "Converting…");
-    try {
-      const blob = await convertOne(item.file, format, quality, maxWidth);
-      const base = item.file.name.replace(/\.[^.]+$/, "") || "image";
-      item.result = { blob, name: `${base}.${format.ext}`, url: URL.createObjectURL(blob) };
-      renderItem(item, `${fmtSize(item.file.size)} → ${fmtSize(blob.size)}`, "ok");
-    } catch (err) {
-      renderItem(item, "Could not convert: " + (err.message || err), "err");
+  try {
+    for (const item of items.slice()) {
+      if (item.result || item.failed || !items.includes(item)) continue;
+      if (myRun !== runId) break; // settings changed; a new run is queued
+      try {
+        const blob = await convertOne(item.file, format, quality, maxWidth);
+        if (myRun !== runId || !items.includes(item)) continue;
+        const base = item.file.name.replace(/\.[^.]+$/, "") || "image";
+        item.result = { blob, name: `${base}.${format.ext}`, url: URL.createObjectURL(blob) };
+        renderItem(item, `${fmtSize(item.file.size)} → ${fmtSize(blob.size)}`, "ok");
+        refreshBulk();
+        if (autoDl.checked) triggerDownload(item.result.url, item.result.name);
+      } catch (err) {
+        if (items.includes(item)) {
+          item.failed = true;
+          renderItem(item, "Could not convert: " + (err.message || err), "err");
+        }
+      }
     }
+  } finally {
+    running = false;
   }
-  convertBtn.disabled = items.length === 0;
-  refreshButtons();
+  // Files added (or settings changed) while we were busy still need converting.
+  if (items.some((i) => !i.result && !i.failed)) schedule(0);
+}
+
+function triggerDownload(url, name) {
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
 }
 
 async function convertOne(file, format, quality, maxWidth) {
@@ -293,9 +367,6 @@ async function downloadZip() {
 
   const blob = new Blob([...parts, ...central, end.buffer], { type: "application/zip" });
   const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "offlip-converted.zip";
-  a.click();
+  triggerDownload(url, "offlip-converted.zip");
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 }

@@ -14,32 +14,42 @@
   </header>
 
   <main>
+    <div class="formats-row">
+      <span class="formats-label">Convert to</span>
+      <div id="formats" class="formats" role="radiogroup" aria-label="Output format"></div>
+    </div>
+
     <section id="drop" class="drop" tabindex="0" role="button" aria-label="Choose images to convert">
-      <p class="drop-title">Drop images here</p>
-      <p class="drop-sub">or click to choose &middot; PNG, JPG, WebP, GIF, BMP, AVIF, SVG</p>
+      <p class="drop-title">Drop images anywhere</p>
+      <p class="drop-sub">or click to choose, or paste &middot; they convert instantly</p>
       <input id="file-input" type="file" accept="image/*" multiple hidden>
     </section>
 
-    <section class="controls" aria-label="Conversion settings">
-      <label>Convert to
-        <select id="format"></select>
-      </label>
-      <label id="quality-wrap"><span>Quality <output id="quality-out">90</output>%</span>
-        <input id="quality" type="range" min="1" max="100" value="90">
-      </label>
-      <label>Max width (px)
-        <input id="max-width" type="number" min="1" placeholder="original">
-      </label>
-    </section>
-
-    <section class="actions">
-      <button id="convert" class="primary" disabled>Convert</button>
-      <button id="download-all" disabled>Download all (.zip)</button>
-      <button id="clear" disabled>Clear</button>
-    </section>
-
     <ul id="list" class="list" aria-live="polite"></ul>
+
+    <div id="bulk" class="bulk" hidden>
+      <button id="download-all" class="primary">Download all (.zip)</button>
+      <button id="clear" class="link">Clear</button>
+    </div>
+
+    <details class="options">
+      <summary>Options</summary>
+      <div class="controls">
+        <label id="quality-wrap"><span>Quality <output id="quality-out">90</output>%</span>
+          <input id="quality" type="range" min="1" max="100" value="90">
+        </label>
+        <label><span>Max width (px)</span>
+          <input id="max-width" type="number" min="1" placeholder="original">
+        </label>
+        <label class="check">
+          <input id="auto-download" type="checkbox">
+          <span>Download automatically</span>
+        </label>
+      </div>
+    </details>
   </main>
+
+  <div id="overlay" class="overlay" hidden>Drop to convert</div>
 
   <footer>
     <p>Everything runs on your device. Close the tab and it's gone.</p>
