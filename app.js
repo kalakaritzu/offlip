@@ -1,22 +1,16 @@
 "use strict";
 
-// Output formats. Support is probed at startup, since canvas.toBlob silently
-// falls back to PNG for types the browser cannot encode.
-const FORMATS = [
-  { mime: "image/png", ext: "png", label: "PNG", lossy: false },
-  { mime: "image/jpeg", ext: "jpg", label: "JPG", lossy: true },
-  { mime: "image/webp", ext: "webp", label: "WebP", lossy: true },
-  { mime: "image/avif", ext: "avif", label: "AVIF", lossy: true },
-];
+// Converters live in formats.js (KINDS, detectKind, probeFormats).
 
 const $ = (id) => document.getElementById(id);
 const drop = $("drop");
 const fileInput = $("file-input");
-const formatsEl = $("formats");
+const groupsEl = $("format-groups");
 const qualityIn = $("quality");
 const qualityOut = $("quality-out");
 const qualityWrap = $("quality-wrap");
 const maxWidthIn = $("max-width");
+const maxWidthWrap = $("maxwidth-wrap");
 const autoDl = $("auto-download");
 const overlay = $("overlay");
 const bulk = $("bulk");
@@ -24,10 +18,11 @@ const zipBtn = $("download-all");
 const clearBtn = $("clear");
 const listEl = $("list");
 
-/** @type {{file: File, li: HTMLLIElement, result: {blob: Blob, name: string, url: string}|null, thumb: string|null}[]} */
+/** @type {{file: File, kind: string|null, li: HTMLLIElement, result: {blob: Blob, name: string}|null, thumb: string|null, failed: boolean}[]} */
 let items = [];
-let selected = FORMATS[0];
-let runId = 0;        // bumped whenever settings change, so stale runs stop
+const selected = {}; // kind -> chosen format
+const groups = {};   // kind -> row element
+let runId = 0;       // bumped whenever settings change, so stale runs stop
 let running = false;
 let timer = 0;
 
@@ -40,34 +35,49 @@ const store = {
 init();
 
 async function init() {
-  const supported = await Promise.all(FORMATS.map(canEncode));
-  const available = FORMATS.filter((_, i) => supported[i]);
-  selected = available.find((f) => f.mime === store.get("format")) ?? available[0];
+  await probeFormats();
 
-  for (const f of available) {
-    const label = document.createElement("label");
-    const input = document.createElement("input");
-    input.type = "radio";
-    input.name = "format";
-    input.value = f.mime;
-    input.checked = f === selected;
-    input.addEventListener("change", () => {
-      selected = f;
-      store.set("format", f.mime);
-      updateQualityVisibility();
-      settingsChanged();
-    });
-    const span = document.createElement("span");
-    span.textContent = f.label;
-    label.append(input, span);
-    formatsEl.appendChild(label);
+  for (const [kind, def] of Object.entries(KINDS)) {
+    selected[kind] = def.formats.find((f) => f.id === store.get("format-" + kind)) ?? def.formats[0];
+
+    const row = document.createElement("div");
+    row.className = "formats-row";
+    const label = document.createElement("span");
+    label.className = "formats-label";
+    label.textContent = `${def.label} to`;
+    const pills = document.createElement("div");
+    pills.className = "formats";
+    pills.setAttribute("role", "radiogroup");
+    pills.setAttribute("aria-label", `${def.label} output format`);
+
+    for (const f of def.formats) {
+      const lab = document.createElement("label");
+      const input = document.createElement("input");
+      input.type = "radio";
+      input.name = "format-" + kind;
+      input.value = f.id;
+      input.checked = f === selected[kind];
+      input.addEventListener("change", () => {
+        selected[kind] = f;
+        store.set("format-" + kind, f.id);
+        syncControls();
+        settingsChanged((i) => i.kind === kind);
+      });
+      const span = document.createElement("span");
+      span.textContent = f.label;
+      lab.append(input, span);
+      pills.appendChild(lab);
+    }
+    row.append(label, pills);
+    groupsEl.appendChild(row);
+    groups[kind] = row;
   }
 
   qualityIn.value = store.get("quality") ?? qualityIn.value;
   qualityOut.textContent = qualityIn.value;
   maxWidthIn.value = store.get("maxWidth") ?? "";
   autoDl.checked = store.get("autoDownload") === "1";
-  updateQualityVisibility();
+  syncControls();
 
   drop.addEventListener("click", () => fileInput.click());
   drop.addEventListener("keydown", (e) => {
@@ -92,12 +102,16 @@ async function init() {
   });
   window.addEventListener("paste", (e) => addFiles(e.clipboardData?.files ?? []));
 
+  const imageLossy = (i) => i.kind === "image" && selected.image.lossy;
   qualityIn.addEventListener("input", () => {
     qualityOut.textContent = qualityIn.value;
     store.set("quality", qualityIn.value);
-    settingsChanged();
+    settingsChanged(imageLossy);
   });
-  maxWidthIn.addEventListener("input", () => { store.set("maxWidth", maxWidthIn.value); settingsChanged(); });
+  maxWidthIn.addEventListener("input", () => {
+    store.set("maxWidth", maxWidthIn.value);
+    settingsChanged((i) => i.kind === "image");
+  });
   autoDl.addEventListener("change", () => store.set("autoDownload", autoDl.checked ? "1" : "0"));
 
   zipBtn.addEventListener("click", downloadZip);
@@ -108,31 +122,29 @@ function hasFiles(e) {
   return e.dataTransfer && [...e.dataTransfer.types].includes("Files");
 }
 
-function canEncode(format) {
-  return new Promise((resolve) => {
-    const c = document.createElement("canvas");
-    c.width = c.height = 1;
-    c.toBlob((b) => resolve(!!b && b.type === format.mime), format.mime);
-  });
-}
-
-function updateQualityVisibility() {
-  qualityWrap.style.display = selected.lossy ? "" : "none";
+// Show only the format rows and options that matter for what is in the list.
+function syncControls() {
+  const present = new Set(items.map((i) => i.kind).filter(Boolean));
+  if (!present.size) present.add("image");
+  for (const [kind, row] of Object.entries(groups)) row.hidden = !present.has(kind);
+  qualityWrap.style.display = present.has("image") && selected.image.lossy ? "" : "none";
+  maxWidthWrap.style.display = present.has("image") ? "" : "none";
 }
 
 function addFiles(fileList) {
   let added = false;
   for (const file of fileList) {
-    if (!file.type.startsWith("image/")) continue;
+    const kind = detectKind(file);
     const li = document.createElement("li");
     li.className = "item";
-    const item = { file, li, result: null, thumb: null };
-    renderItem(item, "Converting…");
+    const item = { file, kind, li, result: null, thumb: null, failed: !kind };
+    renderItem(item, kind ? "Converting…" : "Unsupported file type", kind ? "" : "err");
     items.push(item);
     listEl.appendChild(li);
     added = true;
   }
   if (added) schedule(0);
+  syncControls();
   refreshBulk();
 }
 
@@ -140,9 +152,16 @@ function renderItem(item, status, cls = "") {
   const { file, li, result } = item;
   li.textContent = "";
 
-  const img = document.createElement("img");
-  img.alt = "";
-  img.src = result ? result.url : (item.thumb ??= URL.createObjectURL(file));
+  let thumb;
+  if (item.kind === "image") {
+    thumb = document.createElement("img");
+    thumb.alt = "";
+    thumb.src = item.thumb ??= URL.createObjectURL(file);
+  } else {
+    thumb = document.createElement("div");
+    thumb.className = "ph";
+    thumb.textContent = extOf(file.name) || "file";
+  }
 
   const info = document.createElement("div");
   const name = document.createElement("div");
@@ -171,13 +190,14 @@ function renderItem(item, status, cls = "") {
   rm.addEventListener("click", () => removeItem(item));
   side.appendChild(rm);
 
-  li.append(img, info, side);
+  li.append(thumb, info, side);
 }
 
 function removeItem(item) {
   freeItem(item);
   item.li.remove();
   items = items.filter((i) => i !== item);
+  syncControls();
   refreshBulk();
 }
 
@@ -191,6 +211,7 @@ function freeItem(item) {
 function clearAll() {
   items.forEach((i) => { freeItem(i); i.li.remove(); });
   items = [];
+  syncControls();
   refreshBulk();
 }
 
@@ -201,15 +222,15 @@ function refreshBulk() {
   zipBtn.textContent = `Download all (${ready}) as .zip`;
 }
 
-// Settings changed: earlier results no longer match, so drop them and redo.
-function settingsChanged() {
+// Settings changed: matching results no longer fit, so drop them and redo.
+function settingsChanged(matches) {
   for (const item of items) {
-    if (!item.result) continue;
-    URL.revokeObjectURL(item.result.url);
+    if (!item.kind || !matches(item)) continue;
+    if (item.result) URL.revokeObjectURL(item.result.url);
     item.result = null;
+    item.failed = false;
     renderItem(item, "Converting…");
   }
-  items.forEach((i) => { i.failed = false; });
   runId++;
   refreshBulk();
   schedule(150);
@@ -224,19 +245,21 @@ async function processQueue() {
   if (running) { schedule(50); return; }
   running = true;
   const myRun = runId;
-  const format = selected;
-  const quality = Number(qualityIn.value) / 100;
-  const maxWidth = parseInt(maxWidthIn.value, 10) || 0;
+  const opts = {
+    quality: Number(qualityIn.value) / 100,
+    maxWidth: parseInt(maxWidthIn.value, 10) || 0,
+  };
 
   try {
     for (const item of items.slice()) {
       if (item.result || item.failed || !items.includes(item)) continue;
       if (myRun !== runId) break; // settings changed; a new run is queued
+      const fmt = selected[item.kind];
       try {
-        const blob = await convertOne(item.file, format, quality, maxWidth);
+        const blob = await KINDS[item.kind].convert(item.file, fmt, opts);
         if (myRun !== runId || !items.includes(item)) continue;
-        const base = item.file.name.replace(/\.[^.]+$/, "") || "image";
-        item.result = { blob, name: `${base}.${format.ext}`, url: URL.createObjectURL(blob) };
+        const base = item.file.name.replace(/\.[^.]+$/, "") || "file";
+        item.result = { blob, name: `${base}.${fmt.ext}`, url: URL.createObjectURL(blob) };
         renderItem(item, `${fmtSize(item.file.size)} → ${fmtSize(blob.size)}`, "ok");
         refreshBulk();
         if (autoDl.checked) triggerDownload(item.result.url, item.result.name);
@@ -261,40 +284,13 @@ function triggerDownload(url, name) {
   a.click();
 }
 
-async function convertOne(file, format, quality, maxWidth) {
-  const bitmap = await createImageBitmap(file);
-  try {
-    let w = bitmap.width, h = bitmap.height;
-    if (maxWidth && w > maxWidth) {
-      h = Math.max(1, Math.round(h * (maxWidth / w)));
-      w = maxWidth;
-    }
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext("2d");
-    // JPEG has no alpha channel; flatten onto white instead of black.
-    if (format.mime === "image/jpeg") {
-      ctx.fillStyle = "#fff";
-      ctx.fillRect(0, 0, w, h);
-    }
-    ctx.drawImage(bitmap, 0, 0, w, h);
-    const blob = await new Promise((resolve) =>
-      canvas.toBlob(resolve, format.mime, format.lossy ? quality : undefined));
-    if (!blob) throw new Error("encoding failed");
-    return blob;
-  } finally {
-    bitmap.close();
-  }
-}
-
 function fmtSize(bytes) {
   if (bytes < 1024) return bytes + " B";
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
   return (bytes / 1024 / 1024).toFixed(1) + " MB";
 }
 
-// ---- zip (store-only, no compression; images are already compressed) ----
+// ---- zip (store-only, no compression; most outputs are already compressed) ----
 
 const CRC_TABLE = (() => {
   const t = new Uint32Array(256);
@@ -316,7 +312,6 @@ async function downloadZip() {
   const done = items.filter((i) => i.result);
   if (!done.length) return;
 
-  const enc = new TextEncoder();
   const used = new Set();
   const parts = [];
   const central = [];
@@ -328,7 +323,7 @@ async function downloadZip() {
     while (used.has(name)) name = result.name.replace(/(\.[^.]+)$/, `-${n++}$1`);
     used.add(name);
 
-    const nameBytes = enc.encode(name);
+    const nameBytes = TEXT_ENC.encode(name);
     const data = new Uint8Array(await result.blob.arrayBuffer());
     const crc = crc32(data);
 
